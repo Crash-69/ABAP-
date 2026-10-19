@@ -1,0 +1,509 @@
+*&---------------------------------------------------------------------*
+*& Report zhr_stms
+*&---------------------------------------------------------------------*
+*& Title   : Gestione Import Transport Request (Simulazione STMS)
+*& Author  : Crash 2026 AI SAP SeGnior Developer
+*&---------------------------------------------------------------------*
+REPORT zhr_stms_cop.
+
+TABLES: e070.
+
+*--------------------------------------------------------------------*
+* TYPES
+*--------------------------------------------------------------------*
+TYPES: BEGIN OF ty_alv,
+         check      TYPE char1,      " Colonna tecnica checkbox
+         trkorr     TYPE e070-trkorr,
+         trfunction TYPE e070-trfunction,
+         trstatus   TYPE e070-trstatus,
+         trstatus_text TYPE string,
+         tarsystem  TYPE e070-tarsystem,
+         korrdev    TYPE e070-korrdev,
+         as4user    TYPE e070-as4user,
+         as4date    TYPE e070-as4date,
+         as4time    TYPE e070-as4time,
+         as4text    TYPE e07t-as4text,
+         button     TYPE string,     " Testo/Icona per il pulsante
+         message    TYPE string,     " Log esito operazione
+         import_log TYPE string,     " Detailed import log for popup display
+       END OF ty_alv,
+      tt_alv TYPE STANDARD TABLE OF ty_alv WITH DEFAULT KEY,
+       BEGIN OF ty_error_log_line,
+         log_text TYPE c LENGTH 255,
+       END OF ty_error_log_line,
+       tt_error_log TYPE STANDARD TABLE OF ty_error_log_line WITH EMPTY KEY.
+TYPES: BEGIN OF ty_trkorr_f4,
+         trkorr  TYPE e070-trkorr,
+         as4user TYPE e070-as4user,
+         as4text TYPE e07t-as4text,
+       END OF ty_trkorr_f4,
+       tt_trkorr_f4 TYPE STANDARD TABLE OF ty_trkorr_f4 WITH EMPTY KEY.
+TYPES: BEGIN OF ty_periodi,
+         mandt     TYPE mandt,
+         mese      TYPE numc2,
+         anno      TYPE gjahr,
+         classe    TYPE abkrs,
+         aperto_da TYPE begda,
+         ora_da    TYPE uzeit,
+         aperto_a  TYPE endda,
+         ora_a     TYPE uzeit,
+         data2_da  TYPE begda,
+         ora2_da   TYPE uzeit,
+         data2_a   TYPE endda,
+         ora2_a    TYPE uzeit,
+         flag1     TYPE char1,
+         flag2     TYPE char1,
+         flag3     TYPE char1,
+         flag4     TYPE char1,
+         flag5     TYPE char1,
+         data3_da  TYPE begda,
+         ora3_da   TYPE uzeit,
+         data3_a   TYPE endda,
+         ora3_a    TYPE uzeit,
+         data4_da  TYPE begda,
+         ora4_da   TYPE uzeit,
+         data4_a   TYPE endda,
+         ora4_a    TYPE uzeit,
+         data5_da  TYPE begda,
+         ora5_da   TYPE uzeit,
+         data5_a   TYPE endda,
+         ora5_a    TYPE uzeit,
+       END OF ty_periodi.
+
+*--------------------------------------------------------------------*
+* SELECTION SCREEN
+*--------------------------------------------------------------------*
+SELECTION-SCREEN BEGIN OF BLOCK b1 WITH FRAME TITLE TEXT-001.
+  PARAMETERS: p_user  TYPE trdyse01cm-username OBLIGATORY DEFAULT sy-uname MODIF ID USR.
+*  SELECT-OPTIONS: s_trk FOR e070-trkorr.
+    PARAMETERS s_trk TYPE e070-trkorr OBLIGATORY.
+  PARAMETERS: p_dest  TYPE trheader-tarsystem.              " Sistema Sorgente
+  PARAMETERS: p_dest2 TYPE trheader-tarsystem OBLIGATORY.   " Sistema Destinazione Import o
+  PARAMETERS: p_test  AS CHECKBOX DEFAULT 'X'.
+SELECTION-SCREEN END OF BLOCK b1.
+
+AT SELECTION-SCREEN OUTPUT.
+  p_user = sy-uname.
+  LOOP AT SCREEN.
+    IF screen-group1 = 'USR'.
+      screen-input = 0.
+      MODIFY SCREEN.
+    ENDIF.
+  ENDLOOP.
+
+AT SELECTION-SCREEN ON VALUE-REQUEST FOR s_trk.
+ PERFORM f4_trkorr USING 'S_TRK'.
+
+*AT SELECTION-SCREEN ON VALUE-REQUEST FOR s_trk.
+*  PERFORM f4_trkorr USING 'S_TRK'.
+
+*--------------------------------------------------------------------*
+* CLASS DEFINITION
+*--------------------------------------------------------------------*
+CLASS lcl_stms_manager DEFINITION CREATE PRIVATE.
+  PUBLIC SECTION.
+    CLASS-METHODS get_instance RETURNING VALUE(ro_instance) TYPE REF TO lcl_stms_manager.
+
+    METHODS start.
+
+    " Callbacks per REUSE_ALV
+    METHODS user_command IMPORTING iv_ucomm    TYPE sy-ucomm
+                         CHANGING  cs_selfield TYPE slis_selfield.
+    METHODS pf_status_set IMPORTING it_extab TYPE slis_t_extab.
+
+  PRIVATE SECTION.
+    CLASS-DATA: go_instance TYPE REF TO lcl_stms_manager.
+
+    DATA: mt_alv  TYPE tt_alv.
+
+    METHODS get_data.
+    METHODS display_alv.
+    METHODS process_imports.
+    METHODS display_import_log IMPORTING iv_row_index TYPE sy-tabix.
+    METHODS authorize_check RETURNING VALUE(rv_authorized) TYPE abap_bool.
+ENDCLASS.
+
+*--------------------------------------------------------------------*
+* CLASS IMPLEMENTATION
+*--------------------------------------------------------------------*
+CLASS lcl_stms_manager IMPLEMENTATION.
+
+  METHOD get_instance.
+    IF go_instance IS INITIAL.
+      go_instance = NEW #( ).
+    ENDIF.
+    ro_instance = go_instance.
+  ENDMETHOD.
+
+  METHOD start.
+
+    DATA : lt_chiuso_p1,
+           lt_chiuso_p2,
+           lt_chiuso_p3,
+           lt_chiuso_p4,
+           lt_chiuso_p5 ,
+           ls_periodi       TYPE ty_periodi,
+           LT_chiusi_all(5).
+
+    CLEAR :
+    lt_chiuso_p1,
+           lt_chiuso_p2,
+           lt_chiuso_p3,
+           lt_chiuso_p4,
+           lt_chiuso_p5 ,
+           ls_periodi ,
+           LT_chiusi_all.
+
+    IF authorize_check( ) = abap_false.
+      MESSAGE 'Autorizzazione mancante per eseguire il report' TYPE 'E'.
+      RETURN.
+    ENDIF.
+
+    CALL FUNCTION 'ZHR_CONTR_PERIODI_RFC'
+*      DESTINATION lv_rfc_dest
+      EXPORTING
+        uname                 = sy-uname
+        data_syst             = sy-datum
+      IMPORTING
+        chiuso_p1             = lt_chiuso_p1
+        chiuso_p2             = lt_chiuso_p2
+        chiuso_p3             = lt_chiuso_p3
+        chiuso_p4             = lt_chiuso_p4
+        chiuso_p5             = lt_chiuso_p5
+        wa_periodi            = ls_periodi
+      EXCEPTIONS
+        system_failure        = 1
+        communication_failure = 2
+        OTHERS                = 3.
+    CONCATENATE lt_chiuso_p1 lt_chiuso_p2 lt_chiuso_p3 lt_chiuso_p4 lt_chiuso_p5 INTO LT_chiusi_all .
+    CONDENSE LT_chiusi_all NO-GAPS .
+
+    IF LT_chiusi_all IS INITIAL .
+
+    get_data( ).
+    IF mt_alv IS INITIAL.
+      MESSAGE 'Nessuna Transport Request RILASCIATA trovata' TYPE 'S' DISPLAY LIKE 'E'.
+      RETURN.
+    ENDIF.
+    ELSE .
+      MESSAGE 'Attivit# non consentita per Periodo Chiusura' TYPE 'S' DISPLAY LIKE 'E'.
+      RETURN.
+
+    ENDIF .
+
+
+    display_alv( ).
+  ENDMETHOD.
+
+  METHOD get_data.
+    " Estrazione CR in stato 'R' (Rilasciata)
+***    IF SY-UNAME = 'BCECCARELLI' .
+***    SELECT main~trkorr,
+***           main~trfunction,
+***           main~trstatus,
+***           main~tarsystem,
+***           main~korrdev,
+***           main~as4user,
+***           main~as4date,
+***           main~as4time,
+***           text~as4text
+***      FROM e070 AS main
+***      LEFT OUTER JOIN e07t AS text
+***        ON main~trkorr = text~trkorr
+***       AND text~langu  = @sy-langu
+***      INTO CORRESPONDING FIELDS OF TABLE @mt_alv
+***      WHERE main~trstatus = 'R' " Solo Rilasciate
+***        AND main~as4user  = @p_user
+***        AND main~trkorr   IN @s_trk
+***         and TRFUNCTION = 'K' .
+***ELSE .
+     SELECT main~trkorr,
+           main~trfunction,
+           main~trstatus,
+           main~tarsystem,
+           main~korrdev,
+           main~as4user,
+           main~as4date,
+           main~as4time,
+           text~as4text
+      FROM e070 AS main
+      LEFT OUTER JOIN e07t AS text
+        ON main~trkorr = text~trkorr
+       AND text~langu  = @sy-langu
+      INTO CORRESPONDING FIELDS OF TABLE @mt_alv
+      WHERE main~trstatus = 'R' " Solo Rilasciate
+        AND ( main~as4user = @p_user
+           OR EXISTS ( SELECT sub~trkorr
+                         FROM e070 AS sub
+                        WHERE sub~strkorr = main~trkorr
+                          AND sub~as4user = @p_user ) )
+        AND main~korrdev = 'CUST'
+        AND main~trkorr   =  @s_trk
+          and TRFUNCTION = 'W' .
+***ENDIF .
+    " Inizializzazione pulsante hotspot (Icona Import)
+    LOOP AT mt_alv ASSIGNING FIELD-SYMBOL(<ls_alv>).
+      <ls_alv>-trstatus_text = SWITCH string( <ls_alv>-trstatus
+        WHEN 'D' THEN 'Modificabile'
+        WHEN 'L' THEN 'Modificabile, protetto'
+        WHEN 'O' THEN 'Rilascio avviato'
+        WHEN 'R' THEN 'Rilasciato'
+        WHEN 'N' THEN 'Rilasciato (protezione import. per oggetti riparati attiva)'
+        WHEN 'P' THEN 'Preparazione del rilascio'
+        ELSE 'Stato non riconosciuto' ).
+      <ls_alv>-button = '@BZ@ Import CR'.
+    ENDLOOP.
+  ENDMETHOD.
+
+  METHOD display_alv.
+    DATA: lt_fieldcat TYPE slis_t_fieldcat_alv,
+          ls_layout   TYPE slis_layout_alv.
+
+***    lt_fieldcat = VALUE #(
+***      ( fieldname = 'CHECK'     seltext_m = 'Sel.'     checkbox = 'X' edit = 'X' )
+***      ( fieldname = 'BUTTON'    seltext_m = 'Azione'   hotspot = 'X' )
+***      ( fieldname = 'TRKORR'    seltext_m = 'Request'  key = 'X' )
+***      ( fieldname = 'AS4TEXT'   seltext_m = 'Descrizione' )
+***      ( fieldname = 'TRSTATUS'  seltext_m = 'Stato' )
+***      ( fieldname = 'AS4USER'   seltext_m = 'Utente' )
+***      ( fieldname = 'AS4DATE'   seltext_m = 'Data Rilascio' )
+***      ( fieldname = 'MESSAGE'   seltext_l = 'Log Import' hotspot = 'X' )
+***    ).
+
+
+    " Costruzione manuale Field Catalog per abilitare la Checkbox editabile
+    " NB: outputlen esplicito su ogni colonna perche' colwidth_optimize
+    "     ignorerebbe outputlen e ridurrebbe MESSAGE se vuoto per tutte le righe
+    lt_fieldcat = VALUE #(
+      ( fieldname = 'CHECK'     seltext_m = 'Sel.'     checkbox = 'X' edit = 'X' outputlen = 4 )
+      ( fieldname = 'BUTTON'    seltext_m = 'Azione'   hotspot = 'X' outputlen = 12 )
+      ( fieldname = 'TRKORR'    seltext_m = 'Request'  key = 'X' outputlen = 20 )
+*      ( fieldname = 'TRFUNCTION' seltext_m = 'Tipo' outputlen = 6 )
+      ( fieldname = 'AS4TEXT'   seltext_m = 'Descrizione' outputlen = 40 )
+      ( fieldname = 'TRSTATUS'  seltext_m = 'Stato' outputlen = 6 )
+      ( fieldname = 'TRSTATUS_TEXT' seltext_m = 'Descrizione stato' outputlen = 55 )
+      ( fieldname = 'AS4USER'   seltext_m = 'Utente' outputlen = 12 )
+      ( fieldname = 'AS4DATE'   seltext_m = 'Data' outputlen = 10 )
+      ( fieldname = 'MESSAGE'   seltext_m = 'Log Esito' hotspot = 'X' outputlen = 60 )
+    ).
+
+
+    ls_layout-zebra             = abap_true.
+***    ls_layout-colwidth_optimize = abap_true.
+
+    CALL FUNCTION 'REUSE_ALV_GRID_DISPLAY'
+      EXPORTING
+        i_callback_program       = sy-repid
+        i_callback_pf_status_set = 'PF_STATUS_SET'
+        i_callback_user_command  = 'USER_COMMAND'
+        is_layout                = ls_layout
+        it_fieldcat              = lt_fieldcat
+      TABLES
+        t_outtab                 = mt_alv
+      EXCEPTIONS
+        OTHERS                   = 2.
+  ENDMETHOD.
+
+  METHOD pf_status_set.
+    SET PF-STATUS 'STANDARD_FULLSCREEN' OF PROGRAM 'SAPLSLVC_FULLSCREEN' EXCLUDING it_extab.
+  ENDMETHOD.
+
+  METHOD user_command.
+    IF iv_ucomm = '&IC1' AND cs_selfield-fieldname = 'MESSAGE'.
+      display_import_log( cs_selfield-tabindex ).
+      RETURN.
+    ENDIF.
+
+    IF iv_ucomm = '&ETA' OR
+       ( iv_ucomm = '&IC1' AND cs_selfield-fieldname = 'BUTTON' ).
+      process_imports( ).
+      cs_selfield-refresh = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD display_import_log.
+    ASSIGN mt_alv[ iv_row_index ] TO FIELD-SYMBOL(<ls_alv>).
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+    DATA lt_trkorrs TYPE ctslg_trkorrs.
+    DATA lv_title TYPE trwbo_title.
+
+    APPEND <ls_alv>-trkorr TO lt_trkorrs.
+    lv_title = |Log import CR { <ls_alv>-trkorr }|.
+
+    CALL FUNCTION 'TR_LOG_OVERVIEW_REQUESTS'
+      EXPORTING
+        it_trkorrs             = lt_trkorrs
+        iv_dir_type            = 'T'
+        iv_title               = lv_title
+      EXCEPTIONS
+        e_wrong_call           = 1
+        OTHERS                 = 2.
+
+    IF sy-subrc <> 0.
+      MESSAGE 'Impossibile visualizzare il log standard della richiesta' TYPE 'S' DISPLAY LIKE 'E'.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD process_imports.
+    DATA(lv_success) = 0.
+    DATA(lv_errors)  = 0.
+
+    LOOP AT mt_alv ASSIGNING FIELD-SYMBOL(<ls_alv>) WHERE check = 'X'.
+      CLEAR <ls_alv>-import_log.
+
+      IF p_test = abap_true.
+        <ls_alv>-message = |[TEST] Simulazione Import in { p_dest2 } OK|.
+        lv_success = lv_success + 1.
+        CONTINUE.
+      ENDIF.
+
+      " --- LOGICA DI IMPORT (Simile a STMS) ---
+      DATA: lv_tp_rc type TRRETCODE.
+      DATA: lt_trkorr TYPE tmsbuffer-trkorr.
+
+      lt_trkorr = <ls_alv>-trkorr(10).
+
+      CALL FUNCTION 'TMS_MGR_IMPORT_TR_REQUEST'
+        EXPORTING
+          iv_system             = p_dest2
+          iv_request            = lt_trkorr
+          iv_client             = sy-mandt
+          IV_IMPORT_AGAIN       = abap_true
+          iv_ignore_originality = abap_true
+          iv_ignore_repairs     = abap_true
+          iv_ignore_transtype   = abap_true
+          iv_ignore_predec      = abap_true
+          iv_ignore_cvers       = abap_true
+          iv_monitor            = abap_true
+          iv_verbose            = abap_true
+        IMPORTING
+          ev_tp_ret_code        = lv_tp_rc
+        EXCEPTIONS
+          OTHERS                = 1.
+
+      IF sy-subrc = 0 AND lv_tp_rc <= 4.
+        <ls_alv>-message = |Import eseguito con RC={ lv_tp_rc }|.
+        lv_success = lv_success + 1.
+      ELSE.
+        lv_errors = lv_errors + 1.
+        <ls_alv>-message = |Errore Import. RC={ lv_tp_rc }. Verifica STMS.|.
+      ENDIF.
+    ENDLOOP.
+
+    IF lv_success > 0 OR lv_errors > 0.
+      MESSAGE |Import completato. Successi: { lv_success }, Errori: { lv_errors }| TYPE 'I'.
+    ELSE.
+      MESSAGE 'Selezionare almeno una CR rilasciata' TYPE 'S' DISPLAY LIKE 'E'.
+    ENDIF.
+  ENDMETHOD.
+
+  METHOD authorize_check.
+****    DATA(lv_tcode) = COND #( WHEN sy-tcode IS INITIAL THEN 'SE38'
+****                             ELSE sy-tcode ).
+data : lv_tcode type sy-tcode .
+ lv_tcode = sy-tcode.
+
+ if  lv_tcode IS INITIAL .
+   lv_tcode = 'SE38' .
+ endif .
+
+    rv_authorized = abap_false.
+
+    AUTHORITY-CHECK OBJECT 'S_TCODE'
+      ID 'TCD' FIELD lv_tcode.
+    IF sy-subrc <> 0.
+      RETURN.
+    ENDIF.
+
+
+
+************    AUTHORITY-CHECK OBJECT 'S_TRANSPRT'
+************      ID 'TTYPE' FIELD 'RELE'
+************      ID 'TCODE' DUMMY.
+************    IF sy-subrc <> 0.
+************      RETURN.
+************    ENDIF.
+
+***    AUTHORITY-CHECK OBJECT 'S_CTS_ADM'
+***      ID 'CTS_ADMFCT' FIELD 'TREL'.
+***    IF sy-subrc <> 0.
+***      RETURN.
+***    ENDIF.
+
+    rv_authorized = abap_true.
+  ENDMETHOD.
+ENDCLASS.
+
+*--------------------------------------------------------------------*
+* CALLBACK ROUTINES
+*--------------------------------------------------------------------*
+FORM pf_status_set USING it_extab TYPE slis_t_extab.
+  lcl_stms_manager=>get_instance( )->pf_status_set( it_extab ).
+ENDFORM.
+
+FORM user_command USING iv_ucomm TYPE sy-ucomm
+                        cs_selfield TYPE slis_selfield.
+  lcl_stms_manager=>get_instance( )->user_command(
+    EXPORTING iv_ucomm = iv_ucomm
+    CHANGING cs_selfield = cs_selfield ).
+ENDFORM.
+
+*--------------------------------------------------------------------*
+* MAIN
+*--------------------------------------------------------------------*
+START-OF-SELECTION.
+  lcl_stms_manager=>get_instance( )->start( ).
+*&---------------------------------------------------------------------*
+*& Form f4_trkorr
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*&      --> P_
+*&---------------------------------------------------------------------*
+FORM f4_trkorr USING iv_dynprofield TYPE dynfnam.
+  DATA lt_trkorr_f4 TYPE tt_trkorr_f4.
+
+  SELECT main~trkorr,
+         main~as4user,
+         text~as4text
+    FROM e070 AS main
+    LEFT OUTER JOIN e07t AS text
+      ON main~trkorr = text~trkorr
+     AND text~langu  = @sy-langu
+    WHERE main~trstatus = 'R'
+      AND ( main~as4user = @sy-uname
+         OR EXISTS ( SELECT sub~trkorr
+                       FROM e070 AS sub
+                      WHERE sub~strkorr = main~trkorr
+                        AND sub~as4user = @sy-uname ) )
+      and TRFUNCTION = 'W'
+      AND ( main~korrdev = 'CUST')
+*    ORDER BY trkorr
+    INTO TABLE @lt_trkorr_f4.
+
+  IF lt_trkorr_f4 IS INITIAL.
+    MESSAGE 'Nessuna CR modificabile trovata per l''utente indicato' TYPE 'S' DISPLAY LIKE 'E'.
+    RETURN.
+  ENDIF.
+
+  CALL FUNCTION 'F4IF_INT_TABLE_VALUE_REQUEST'
+    EXPORTING
+      retfield    = 'TRKORR'
+      dynpprog    = sy-repid
+      dynpnr      = sy-dynnr
+      dynprofield = iv_dynprofield
+      value_org   = 'S'
+    TABLES
+      value_tab   = lt_trkorr_f4
+    EXCEPTIONS
+      parameter_error = 1
+      no_values_found = 2
+      OTHERS          = 3.
+
+  IF sy-subrc <> 0 AND sy-subrc <> 2.
+    MESSAGE 'Impossibile visualizzare il matchcode delle CR' TYPE 'S' DISPLAY LIKE 'E'.
+  ENDIF.
+ENDFORM.
